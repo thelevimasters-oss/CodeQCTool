@@ -336,14 +336,52 @@ def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
         max_k=max_k, iqr_mult=iqr_mult, mad_mult=mad_mult
     )
 
+    # Points that are not associated with any detected issue
+    issue_indices = set()
+    issue_point_ids = set()
+
+    def collect_issue_entries(frame: pd.DataFrame, include_index: bool = True):
+        if isinstance(frame, pd.DataFrame) and not frame.empty and "Info" not in frame.columns:
+            if include_index:
+                issue_indices.update(frame.index.tolist())
+            if "Point ID" in frame.columns:
+                ids = frame["Point ID"].dropna().astype(str).str.strip()
+                issue_point_ids.update(ids[ids != ""])  # ignore blanks
+
+    collect_issue_entries(non_numeric_df)
+    collect_issue_entries(missing_df)
+    collect_issue_entries(dups)
+    collect_issue_entries(geom_df)
+    collect_issue_entries(unknown_codes)
+    collect_issue_entries(local_outliers, include_index=False)
+
+    if isinstance(attr_issues_df, pd.DataFrame) and not attr_issues_df.empty and "Info" not in attr_issues_df.columns:
+        attr_idx = attr_issues_df["RowIndex"].dropna().astype(int)
+        issue_indices.update(attr_idx.tolist())
+        mapped_ids = df.loc[attr_idx, "Point ID"].dropna().astype(str).str.strip()
+        issue_point_ids.update(mapped_ids[mapped_ids != ""])
+
+    pid_series = df["Point ID"].fillna("").astype(str).str.strip()
+    issue_mask = df.index.isin(issue_indices)
+    if issue_point_ids:
+        issue_mask |= pid_series.isin(issue_point_ids)
+
+    ok_points_df = df.loc[~issue_mask, [
+        "Point ID", "Northing", "Easting", "Elevation", "Feature Code", "Attribute"
+    ]].copy()
+
     # Build Summary counts
     def count_or_zero(d: pd.DataFrame) -> int:
         return 0 if "Info" in d.columns else len(d)
+
+    ok_count = len(ok_points_df)
+
     summary = pd.DataFrame({
         "Category": [
             "Unknown Feature Codes", "Linework Issues", "Linework Events",
             "Non-numeric", "Missing Required", "Duplicate Point IDs",
-            "Geometry Warnings", "Attribute Format Issues", "Local Elevation Outliers"
+            "Geometry Warnings", "Attribute Format Issues", "Local Elevation Outliers",
+            "Points Without Issues"
         ],
         "Count": [
             count_or_zero(unknown_codes),
@@ -354,7 +392,8 @@ def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
             0 if "Info" in dups.columns else len(dups),
             count_or_zero(geom_df),
             count_or_zero(attr_issues_df),
-            count_or_zero(local_outliers)
+            count_or_zero(local_outliers),
+            ok_count
         ]
     })
 
@@ -369,7 +408,8 @@ def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
         "duplicates": dups,
         "geometry": geom_df,
         "attr_issues": attr_issues_df,
-        "elev_outliers": local_outliers
+        "elev_outliers": local_outliers,
+        "ok_points": ok_points_df
     }
 
 # ============ Reporting (Excel or HTML) ============
@@ -393,6 +433,7 @@ def write_excel_report(dfs: dict, output_path: Path):
         write_tab("Geometry Warnings", "geometry")
         write_tab("Attribute Format Issues", "attr_issues")
         write_tab("Local Elevation Outliers", "elev_outliers")
+        write_tab("Points Without Issues", "ok_points")
 
     # Optional header styling
     if load_workbook and PatternFill and Font:
@@ -477,6 +518,7 @@ def write_html_report(dfs: dict, output_path: Path, title="GPI Survey QC Report"
         ("Geometry Warnings","geometry"),
         ("Attribute Format Issues","attr_issues"),
         ("Local Elevation Outliers","elev_outliers"),
+        ("Points Without Issues","ok_points"),
     ]
     link_items = []
     for label, key in sections:
@@ -528,6 +570,8 @@ def write_html_report(dfs: dict, output_path: Path, title="GPI Survey QC Report"
       "Checks for odd number of '|' separators in Attribute column.")}
     {section_block("Local Elevation Outliers", "elev_outliers",
       "Terrain-eligible codes only (Attribute Type != 'Do Not Include').")}
+    {section_block("Points Without Issues", "ok_points",
+      "Subset of survey points without any detected QC findings above.")}
   </main>
 </div>
 </body>
