@@ -21,6 +21,12 @@ import pandas as pd
 import numpy as np
 import re
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:  # pragma: no cover - optional dependency
+    DND_FILES = None
+    TkinterDnD = None
+
 # ============ Theme ============
 GPI_GREEN = "#0F3320"
 GPI_GREY = "#A2AAAD"
@@ -613,7 +619,10 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
         self.destroy()
 
-class App(tk.Tk):
+BaseTk = TkinterDnD.Tk if TkinterDnD else tk.Tk
+
+
+class App(BaseTk):
     def __init__(self):
         super().__init__()
         self.title("GPI Survey QC Tool")
@@ -639,16 +648,19 @@ class App(tk.Tk):
         tk.Label(top, text="Survey CSV:", bg=BG, fg=GPI_GREEN).grid(row=0, column=0, sticky="w")
         self.csv_entry = tk.Entry(top, width=64)
         self.csv_entry.grid(row=0, column=1, padx=6)
+        self._register_file_drop(self.csv_entry)
         tk.Button(top, text="Browse", bg=GPI_HL, command=self._pick_csv).grid(row=0, column=2)
 
         tk.Label(top, text="Survey Features Excel (Survey sheet):", bg=BG, fg=GPI_GREEN).grid(row=1, column=0, sticky="w")
         self.feat_entry = tk.Entry(top, width=64)
         self.feat_entry.grid(row=1, column=1, padx=6)
+        self._register_file_drop(self.feat_entry)
         tk.Button(top, text="Browse", bg=GPI_HL, command=self._pick_feat).grid(row=1, column=2)
 
         tk.Label(top, text="Output Folder:", bg=BG, fg=GPI_GREEN).grid(row=2, column=0, sticky="w")
         self.out_entry = tk.Entry(top, width=64)
         self.out_entry.grid(row=2, column=1, padx=6)
+        self._register_file_drop(self.out_entry)
         tk.Button(top, text="Browse", bg=GPI_HL, command=self._pick_out).grid(row=2, column=2)
 
         # Params
@@ -706,6 +718,33 @@ class App(tk.Tk):
         tk.Label(self, textvariable=self.status, bg=GPI_GREEN, fg="white", anchor="w").pack(fill=tk.X)
 
         self.after(150, self._pump)
+
+    def _register_file_drop(self, entry):
+        if not (TkinterDnD and DND_FILES):
+            return
+        try:
+            entry.drop_target_register(DND_FILES)
+            entry.dnd_bind("<<Drop>>", lambda e, ent=entry: self._on_drop_files(e, ent))
+        except Exception:
+            # If TkDnD is not fully available on the platform, continue without drag-and-drop.
+            pass
+
+    def _on_drop_files(self, event, entry):
+        data = getattr(event, "data", "")
+        if not data:
+            return
+        try:
+            paths = entry.tk.splitlist(data)
+        except Exception:
+            paths = [data]
+        if not paths:
+            return
+        first = str(paths[0]).strip()
+        if first.startswith("{") and first.endswith("}"):
+            first = first[1:-1]
+        entry.delete(0, "end")
+        entry.insert(0, first)
+        entry.focus_set()
 
     # Settings (gear)
     def _open_settings(self):
