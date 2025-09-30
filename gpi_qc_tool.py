@@ -47,7 +47,10 @@ except Exception:
 CONTROL_START = {"ST", "START", "BEG", "BEGIN"}
 CONTROL_END = {"END", "STOP"}
 CONTROL_CLOSE = {"CL", "CLS", "CLOSE", "CLOS"}
-CTRL_RE = re.compile(r"^(ST|START|BEG|BEGIN|END|STOP|CL|CLS|CLOSE|CLOS)[\.,;:]*$", re.IGNORECASE)
+CTRL_RE = re.compile(
+    r"^(ST|START|BEG|BEGIN|END|STOP|CL|CLS|CLOSE|CLOS|PC|PT)[\.,;:]*$",
+    re.IGNORECASE,
+)
 BASE_RE = re.compile(r"^([A-Za-z]+(?:-[A-Za-z]+)*)(\d*)$")
 
 def strip_num_suffix(s: str) -> str:
@@ -58,31 +61,38 @@ def strip_num_suffix(s: str) -> str:
     return m.group(1) if m else token.upper()
 
 def extract_line_events_field(text: str):
-    """Return list of (base, line_id, ctrl) parsed from a single field (Feature Code/Attribute)."""
+    """Return list of dicts describing linework control events parsed from a field."""
     if not isinstance(text, str):
         return []
-    parts = re.split(r"[|\s]+", text.strip())
-    bases, ctrls = [], []
-    for p in parts:
-        pu = p.upper().strip()
-        if not pu:
+
+    tokens = re.split(r"[|\s]+", text.strip())
+    events = []
+    current_base = None  # tuple (base, line_id)
+
+    for tok in tokens:
+        cleaned = tok.strip()
+        if not cleaned:
             continue
-        m = BASE_RE.match(pu)
-        if m:
-            bases.append((m.group(1), m.group(2)))
+        upper_tok = cleaned.upper()
+
+        ctrl_match = CTRL_RE.match(upper_tok)
+        if ctrl_match:
+            ctrl = ctrl_match.group(1).upper()
+            if current_base is not None:
+                base, line_id = current_base
+            else:
+                base, line_id = None, ""
+            events.append({"Base": base, "LineID": line_id, "Ctrl": ctrl})
             continue
-        mc = CTRL_RE.match(pu)
-        if mc:
-            ctrls.append(mc.group(1).upper())
-    out = []
-    if bases and ctrls:
-        for b in bases:
-            for c in ctrls:
-                out.append((b[0], b[1], c))
-    elif ctrls:
-        for c in ctrls:
-            out.append((None, "", c))
-    return out
+
+        base_candidate = upper_tok.rstrip(".,;:")
+        base_match = BASE_RE.match(base_candidate)
+        if base_match:
+            base = base_match.group(1)
+            line_id = base_match.group(2) or ""
+            current_base = (base, line_id)
+
+    return events
 
 # ============ IO helpers ============
 def read_csv_any(path: Path) -> pd.DataFrame:
@@ -268,25 +278,44 @@ def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
         fc_events = extract_line_events_field(row["Feature Code"] if pd.notna(row["Feature Code"]) else "")
         at_events = extract_line_events_field(row["Attribute"] if pd.notna(row["Attribute"]) else "")
         row_base = row["BaseCode"]
-        for (b, l, c) in fc_events + at_events:
+        for ev in fc_events + at_events:
+            base_val = ev.get("Base")
+            line_id_val = ev.get("LineID")
+            line_id_val = "" if line_id_val is None else str(line_id_val)
+            ctrl_val = ev.get("Ctrl")
             events.append({
                 "Row": i,
                 "Point ID": row["Point ID"],
-                "Base": b or row_base,
-                "LineID": l,
-                "Ctrl": c
+                "Base": base_val if base_val is not None else row_base,
+                "LineID": line_id_val,
+                "Ctrl": ctrl_val,
             })
     events_df = pd.DataFrame(events) if events else pd.DataFrame({"Info": ["No line events detected"]})
 
     if not events_df.empty and "Ctrl" in events_df.columns:
         agg = events_df.groupby(["Base", "LineID", "Ctrl"]).size().unstack(fill_value=0)
         # normalize columns that might be missing
-        for col in ["ST","START","BEG","BEGIN","END","STOP","CL","CLS","CLOSE","CLOS"]:
+        for col in [
+            "ST",
+            "START",
+            "BEG",
+            "BEGIN",
+            "END",
+            "STOP",
+            "CL",
+            "CLS",
+            "CLOSE",
+            "CLOS",
+            "PC",
+            "PT",
+        ]:
             if col not in agg.columns:
                 agg[col] = 0
-        agg["Starts"] = agg[["ST","START","BEG","BEGIN"]].sum(axis=1)
-        agg["Ends"] = agg[["END","STOP"]].sum(axis=1)
-        agg["Closes"] = agg[["CL","CLS","CLOSE","CLOS"]].sum(axis=1)
+        agg["Starts"] = agg[["ST", "START", "BEG", "BEGIN"]].sum(axis=1)
+        agg["Ends"] = agg[["END", "STOP"]].sum(axis=1)
+        agg["Closes"] = agg[["CL", "CLS", "CLOSE", "CLOS"]].sum(axis=1)
+        agg["PC_Count"] = agg["PC"] if "PC" in agg.columns else 0
+        agg["PT_Count"] = agg["PT"] if "PT" in agg.columns else 0
         agg["Issue"] = np.where(
             (agg["Starts"] == 0) & ((agg["Ends"] + agg["Closes"]) > 0),
             "Ended/closed with no prior start",
