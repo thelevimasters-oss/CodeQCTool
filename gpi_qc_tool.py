@@ -53,6 +53,8 @@ except Exception:
 CONTROL_START = {"ST", "START", "BEG", "BEGIN"}
 CONTROL_END = {"END", "STOP"}
 CONTROL_CLOSE = {"CL", "CLS", "CLOSE", "CLOS"}
+CONTROL_PC = {"PC"}
+CONTROL_PT = {"PT"}
 CTRL_RE = re.compile(
     r"^(ST|START|BEG|BEGIN|END|STOP|CL|CLS|CLOSE|CLOS|PC|PT)[\.,;:]*$",
     re.IGNORECASE,
@@ -67,37 +69,25 @@ def strip_num_suffix(s: str) -> str:
     return m.group(1) if m else token.upper()
 
 def extract_line_events_field(text: str):
-    """Return list of dicts describing linework control events parsed from a field."""
-    if not isinstance(text, str):
+    """Stream tokens left->right, pairing each control with the most recent base."""
+    if not isinstance(text, str) or not text.strip():
         return []
-
-    tokens = re.split(r"[|\s]+", text.strip())
+    parts = re.split(r"[|\s]+", text.strip())
     events = []
-    current_base = None  # tuple (base, line_id)
-
-    for tok in tokens:
-        cleaned = tok.strip()
-        if not cleaned:
+    current_base, current_lineid = None, ""
+    for p in parts:
+        pu = p.strip()
+        if not pu:
             continue
-        upper_tok = cleaned.upper()
-
-        ctrl_match = CTRL_RE.match(upper_tok)
-        if ctrl_match:
-            ctrl = ctrl_match.group(1).upper()
-            if current_base is not None:
-                base, line_id = current_base
-            else:
-                base, line_id = None, ""
-            events.append({"Base": base, "LineID": line_id, "Ctrl": ctrl})
+        mctrl = CTRL_RE.match(pu.upper())
+        if mctrl:
+            ctrl = mctrl.group(1).upper()
+            events.append((current_base, current_lineid, ctrl))
             continue
-
-        base_candidate = upper_tok.rstrip(".,;:")
-        base_match = BASE_RE.match(base_candidate)
-        if base_match:
-            base = base_match.group(1)
-            line_id = base_match.group(2) or ""
-            current_base = (base, line_id)
-
+        mbase = BASE_RE.match(pu.upper())
+        if mbase:
+            current_base, current_lineid = mbase.group(1), mbase.group(2)
+            continue
     return events
 
 # ============ IO helpers ============
@@ -285,92 +275,140 @@ def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
 
     # Linework events
     events = []
-    for i, row in df.iterrows():
-        fc_events = extract_line_events_field(row["Feature Code"] if pd.notna(row["Feature Code"]) else "")
-        at_events = extract_line_events_field(row["Attribute"] if pd.notna(row["Attribute"]) else "")
-        row_base = row["BaseCode"]
-        for ev in fc_events + at_events:
-            base_val = ev.get("Base")
-            line_id_val = ev.get("LineID")
-            line_id_val = "" if line_id_val is None else str(line_id_val)
-            ctrl_val = ev.get("Ctrl")
-            events.append({
-                "Row": i,
-                "Point ID": row["Point ID"],
-                "Base": base_val if base_val is not None else row_base,
-                "LineID": line_id_val,
-                "Ctrl": ctrl_val,
-            })
-    events_df = pd.DataFrame(events) if events else pd.DataFrame({"Info": ["No line events detected"]})
-
-    if not events_df.empty and "Ctrl" in events_df.columns:
-        agg = events_df.groupby(["Base", "LineID", "Ctrl"]).size().unstack(fill_value=0)
-        # normalize columns that might be missing
-        for col in [
-            "ST",
-            "START",
-            "BEG",
-            "BEGIN",
-            "END",
-            "STOP",
-            "CL",
-            "CLS",
-            "CLOSE",
-            "CLOS",
-            "PC",
-            "PT",
-        ]:
-            if col not in agg.columns:
-                agg[col] = 0
-        agg["Starts"] = agg[["ST", "START", "BEG", "BEGIN"]].sum(axis=1)
-        agg["Ends"] = agg[["END", "STOP"]].sum(axis=1)
-        agg["Closes"] = agg[["CL", "CLS", "CLOSE", "CLOS"]].sum(axis=1)
-        agg["PC_Count"] = agg["PC"] if "PC" in agg.columns else 0
-        agg["PT_Count"] = agg["PT"] if "PT" in agg.columns else 0
-        agg["Issue"] = np.where(
-            (agg["Starts"] == 0) & ((agg["Ends"] + agg["Closes"]) > 0),
-            "Ended/closed with no prior start",
-            np.where(
-                (agg["Starts"] > 0) & ((agg["Ends"] + agg["Closes"]) == 0),
-                "Started but never ended/closed",
-                "OK"
-            )
+    for row_order, (i, row) in enumerate(df.iterrows()):
+        fc_events = extract_line_events_field(
+            row["Feature Code"] if pd.notna(row["Feature Code"]) else ""
         )
-        linework_df = agg.reset_index()
-        if not linework_df.empty:
-            issue_mask = linework_df["Issue"] != "OK"
-            linework_df = linework_df.loc[issue_mask].copy()
-            if not linework_df.empty and not events_df.empty and {"Base", "LineID", "Point ID"}.issubset(events_df.columns):
-                def _format_ids(series: pd.Series) -> str:
-                    ids = {str(x).strip() for x in series if pd.notna(x) and str(x).strip()}
-                    return ", ".join(sorted(ids))
+        at_events = extract_line_events_field(
+            row["Attribute"] if pd.notna(row["Attribute"]) else ""
+        )
+        for base_val, line_id_val, ctrl_val in fc_events + at_events:
+            events.append(
+                {
+                    "Row": i,
+                    "RowOrder": row_order,
+                    "Point ID": row["Point ID"],
+                    "Base": base_val or "",
+                    "LineID": "" if line_id_val is None else str(line_id_val or ""),
+                    "Ctrl": ctrl_val,
+                }
+            )
 
-                pid_map = (
-                    events_df.groupby(["Base", "LineID"])["Point ID"].apply(_format_ids).reset_index()
-                )
-                linework_df = linework_df.merge(pid_map, on=["Base", "LineID"], how="left")
-        if linework_df.empty:
-            linework_df = pd.DataFrame({"Info": ["All lines have matching start/end/close (as detected)"]})
-            events_df = pd.DataFrame({"Info": ["No line events associated with flagged issues"]})
-        else:
-            if not events_df.empty and {"Base", "LineID"}.issubset(events_df.columns):
-                keys = set(
-                    zip(
-                        linework_df["Base"].fillna(""),
-                        linework_df["LineID"].fillna("")
-                    )
-                )
-                events_df = events_df[
-                    events_df.apply(
-                        lambda r: (str(r.get("Base", "") or ""), str(r.get("LineID", "") or "")) in keys,
-                        axis=1
-                    )
-                ]
-                if events_df.empty:
-                    events_df = pd.DataFrame({"Info": ["No line events associated with flagged issues"]})
+    if events:
+        events_df = pd.DataFrame(events)
+        row_base_series = pd.Series(
+            df.loc[events_df["Row"], "BaseCode"].values, index=events_df.index
+        )
+        events_df["Base"] = events_df["Base"].where(
+            events_df["Base"].notna() & events_df["Base"].astype(str).str.strip().ne(""),
+            row_base_series.fillna(""),
+        )
+        events_df["Base"] = events_df["Base"].fillna("")
+        df["_PID_num"] = pd.to_numeric(df["Point ID"], errors="coerce")
+        events_df = events_df.merge(
+            df[["Point ID", "_PID_num"]]
+            .reset_index()
+            .rename(columns={"index": "Row"}),
+            on=["Row", "Point ID"],
+            how="left",
+        )
+        events_df["Ctrl"] = events_df["Ctrl"].str.upper()
+        events_df = (
+            events_df.sort_values(by=["_PID_num", "Point ID", "Row"])
+            .reset_index(drop=True)
+        )
+        events_df.drop(columns=["_PID_num"], inplace=True)
+        df.drop(columns=["_PID_num"], inplace=True)
     else:
-        linework_df = pd.DataFrame({"Info": ["All lines have matching start/end/close (as detected)"]})
-        events_df = pd.DataFrame({"Info": ["No line events associated with flagged issues"]})
+        events_df = pd.DataFrame({"Info": ["No line events detected"]})
+
+    if "Ctrl" in events_df.columns and not events_df.empty:
+        state = {}
+        for idx, ev in events_df.iterrows():
+            base_val = (ev.get("Base") or "").strip()
+            line_id_val = str(ev.get("LineID") or "")
+            ctrl_val = str(ev.get("Ctrl") or "").upper()
+            key = (base_val, line_id_val)
+            if key not in state:
+                state[key] = {
+                    "open": False,
+                    "pc_open": False,
+                    "starts": 0,
+                    "ends": 0,
+                    "closes": 0,
+                    "pcs": 0,
+                    "pts": 0,
+                    "issues": [],
+                    "first_event_idx": idx,
+                }
+            s = state[key]
+
+            if ctrl_val in CONTROL_START:
+                if not s["open"]:
+                    s["open"] = True
+                else:
+                    s["issues"].append("Start while already open")
+                s["starts"] += 1
+            elif ctrl_val in CONTROL_END:
+                if s["open"]:
+                    s["open"] = False
+                    if s["pc_open"]:
+                        s["issues"].append("Line closed with PC still open")
+                        s["pc_open"] = False
+                else:
+                    s["issues"].append("Ended/closed with no prior start")
+                s["ends"] += 1
+            elif ctrl_val in CONTROL_CLOSE:
+                if s["open"]:
+                    s["open"] = False
+                    if s["pc_open"]:
+                        s["issues"].append("Line closed with PC still open")
+                        s["pc_open"] = False
+                else:
+                    s["issues"].append("Ended/closed with no prior start")
+                s["closes"] += 1
+            elif ctrl_val in CONTROL_PC:
+                if not s["open"]:
+                    s["issues"].append("PC before start")
+                elif s["pc_open"]:
+                    s["issues"].append("PC while already in PC segment")
+                else:
+                    s["pc_open"] = True
+                s["pcs"] += 1
+            elif ctrl_val in CONTROL_PT:
+                if s["pc_open"]:
+                    s["pc_open"] = False
+                else:
+                    s["issues"].append("PT without prior PC")
+                s["pts"] += 1
+
+        summary_rows = []
+        for key, s in sorted(state.items(), key=lambda kv: kv[1]["first_event_idx"]):
+            base_key, line_id_key = key
+            if s["open"]:
+                s["issues"].append("Started but never ended/closed")
+            if s["pc_open"]:
+                s["issues"].append("PC without PT by file end")
+            summary_rows.append(
+                {
+                    "Base": base_key,
+                    "LineID": line_id_key,
+                    "Starts": s["starts"],
+                    "Ends": s["ends"],
+                    "Closes": s["closes"],
+                    "PCs": s["pcs"],
+                    "PTs": s["pts"],
+                    "Issues": "; ".join(s["issues"]) if s["issues"] else "OK",
+                }
+            )
+
+        linework_df = (
+            pd.DataFrame(summary_rows)
+            if summary_rows
+            else pd.DataFrame({"Info": ["No line events detected"]})
+        )
+    else:
+        linework_df = pd.DataFrame({"Info": ["No line events detected"]})
 
     # Elevation outliers (terrain-eligible only)
     terrain_df = df[df["BaseCode"].isin(eligible_bases)].reset_index(drop=True)
@@ -391,7 +429,7 @@ def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
         ],
         "Count": [
             count_or_zero(unknown_codes),
-            0 if "Info" in linework_df.columns else (linework_df["Issue"] != "OK").sum(),
+            0 if "Info" in linework_df.columns else (linework_df["Issues"] != "OK").sum(),
             0 if "Info" in events_df.columns else len(events_df),
             count_or_zero(non_numeric_df),
             count_or_zero(missing_df),
@@ -429,7 +467,7 @@ def write_excel_report(dfs: dict, output_path: Path):
             df_.to_excel(w, name, index=False)
 
         write_tab("Unknown Codes", "unknown_codes")
-        write_tab("Linework Issues", "linework_issues")
+        write_tab("Line Continuity", "linework_issues")
         write_tab("Linework Events", "linework_events")
         write_tab("Non-numeric", "non_numeric")
         write_tab("Missing Required", "missing")
