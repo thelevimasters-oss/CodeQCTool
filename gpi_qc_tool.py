@@ -21,6 +21,9 @@ import base64
 import pandas as pd
 import numpy as np
 import re
+import sys
+import traceback
+import uuid
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -74,6 +77,54 @@ def strip_num_suffix(s: str) -> str:
     token = s.strip().split()[0] if s else ""
     m = BASE_RE.match(token.upper())
     return m.group(1) if m else token.upper()
+
+
+def _generate_error_code() -> str:
+    """Return a short random error code for crash reporting."""
+    return f"E{uuid.uuid4().hex[:8].upper()}"
+
+
+def _write_crash_log(error_code: str, exc: Exception, *, context=None, preferred_dir=None):
+    """Persist diagnostic information about a crash.
+
+    Returns the path of the written log file, or ``None`` if logging failed.
+    """
+    context = context or {}
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    lines = [
+        "GPI Survey QC Tool crash report",
+        f"Timestamp: {timestamp}",
+        f"Error code: {error_code}",
+        f"Python: {sys.version}",
+    ]
+    for key, value in context.items():
+        lines.append(f"{key}: {value}")
+    lines.append("\nTraceback:\n" + tb)
+
+    log_content = "\n".join(lines)
+    log_name = f"gpi_qc_tool_{error_code}.log"
+
+    candidate_dirs = []
+    if preferred_dir:
+        try:
+            candidate_dirs.append(Path(preferred_dir))
+        except Exception:
+            pass
+    candidate_dirs.extend([
+        Path.home() / "GPI_QC_Tool_Logs",
+        Path(__file__).resolve().parent / "logs",
+    ])
+
+    for directory in candidate_dirs:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            log_path = directory / log_name
+            log_path.write_text(log_content, encoding="utf-8")
+            return log_path
+        except Exception:
+            continue
+    return None
 
 def extract_line_events_field(text: str):
     """Stream tokens left->right, pairing each control with the most recent base."""
@@ -845,6 +896,7 @@ class App(BaseTk):
         t.start()
 
     def _run_qc(self):
+        csv = feat = outdir = None
         try:
             csv = Path(self.csv_entry.get())
             feat = Path(self.feat_entry.get())
@@ -874,9 +926,35 @@ class App(BaseTk):
             self.status.set("Done")
             messagebox.showinfo("QC Complete", f"Report saved to:\n{out}")
         except Exception as e:
+            error_code = _generate_error_code()
+            context = {
+                "Survey CSV": str(csv) if csv else "",
+                "Survey Features": str(feat) if feat else "",
+                "Output folder": str(outdir) if outdir else "",
+            }
+            log_path = _write_crash_log(
+                error_code,
+                e,
+                context=context,
+                preferred_dir=outdir if outdir else None,
+            )
             self.status.set("Error")
-            self.log_q.put("ERROR: " + str(e))
-            messagebox.showerror("QC Failed", str(e))
+            self.log_q.put(f"ERROR [{error_code}]: {e}")
+            if log_path:
+                self.log_q.put(f"Crash log saved to: {log_path}")
+            else:
+                self.log_q.put("Unable to save crash log.")
+
+            user_message = [
+                "An unexpected error occurred while running QC.",
+                f"Error code: {error_code}",
+            ]
+            if log_path:
+                user_message.append(f"Details were saved to:\n{log_path}")
+            else:
+                user_message.append("The crash log could not be written. See console for details.")
+            user_message.append(f"Original error:\n{e}")
+            messagebox.showerror("QC Failed", "\n\n".join(user_message))
         finally:
             self.run_btn.config(state="normal")
 
@@ -891,5 +969,24 @@ class App(BaseTk):
             pass
         self.after(150, self._pump)
 
-if __name__ == "__main__":
+def main():
     App().mainloop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # pragma: no cover - fatal fallback
+        error_code = _generate_error_code()
+        log_path = _write_crash_log(error_code, exc)
+        err_lines = [
+            "A fatal error occurred while starting the GPI Survey QC Tool.",
+            f"Error code: {error_code}",
+        ]
+        if log_path:
+            err_lines.append(f"Crash log saved to: {log_path}")
+        else:
+            err_lines.append("Additionally, the crash log could not be written.")
+        err_lines.append("See console for more details.")
+        sys.stderr.write("\n".join(err_lines) + "\n")
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
