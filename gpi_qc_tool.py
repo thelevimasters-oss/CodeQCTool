@@ -249,11 +249,36 @@ def local_plane_outliers(df: pd.DataFrame,
 
     return pd.DataFrame(out) if out else pd.DataFrame({"Info": ["No local elevation outliers found"]})
 
+def _load_features_sheet(features_path: Path) -> pd.DataFrame:
+    """Return the survey-features sheet with flexible sheet matching.
+
+    Some user workbooks ship with the "Survey" sheet renamed (for example,
+    "survey" or "Sheet1").  The previous implementation hard-failed in those
+    scenarios.  Here we first attempt the canonical sheet name and then look for
+    a case-insensitive match.  As a final fallback we use the first sheet in the
+    workbook when it is unambiguous (only one sheet is present).
+    """
+
+    try:
+        return pd.read_excel(features_path, sheet_name="Survey")
+    except ValueError:
+        xl = pd.ExcelFile(features_path)
+        lower_map = {name.lower(): name for name in xl.sheet_names}
+        if "survey" in lower_map:
+            return xl.parse(lower_map["survey"])
+        if len(xl.sheet_names) == 1:
+            return xl.parse(xl.sheet_names[0])
+        sheets = ", ".join(xl.sheet_names)
+        raise ValueError(
+            "Worksheet named 'Survey' not found. Available sheets: " + sheets
+        )
+
+
 def qc_pipeline(csv_path: Path, features_path: Path, output_dir: Path,
                 radius=100.0, min_k=8, k_fallback=15, max_k=30, iqr_mult=3.0, mad_mult=6.0):
     """Runs the QC and returns all result DataFrames + metadata for reporting."""
     # Load features definitions
-    feat = pd.read_excel(features_path, sheet_name="Survey")
+    feat = _load_features_sheet(features_path)
     feat = normalize_cols(feat)
     alpha_col = best_col(feat, "Alpha Code")
     atype_col = best_col(feat, "Attribute Type")
