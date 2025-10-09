@@ -14,6 +14,8 @@ Dependencies: pandas, numpy, openpyxl, xlsxwriter
 import importlib
 import sys
 import traceback
+import subprocess
+import shlex
 from pathlib import Path
 from datetime import datetime
 from typing import NoReturn, Optional
@@ -54,13 +56,64 @@ def _fatal_startup_error(message: str, *, exc: Optional[Exception] = None) -> No
     sys.exit(1)
 
 
+def _attempt_auto_install(packages: str):
+    """Try installing ``packages`` via ``python -m pip install``.
+
+    Returns a tuple of (combined output, return code).
+    """
+
+    if not packages:
+        return "", 0
+
+    cmd = [sys.executable, "-m", "pip", "install", *shlex.split(packages)]
+    completed = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    output_parts = []
+    if completed.stdout:
+        output_parts.append(completed.stdout.strip())
+    if completed.stderr:
+        output_parts.append(completed.stderr.strip())
+    output = "\n".join(part for part in output_parts if part)
+    return output, completed.returncode
+
+
 def _require_module(name: str, friendly_name: str, install_hint: str):
-    """Import ``name`` or abort with a clear dependency error."""
+    """Import ``name`` or attempt to auto-install it before failing."""
 
     try:
         return importlib.import_module(name)
     except ModuleNotFoundError as exc:  # pragma: no cover - requires missing deps
         hint = install_hint.strip()
+
+        if hint:
+            output, returncode = _attempt_auto_install(hint)
+            if returncode == 0:
+                try:
+                    return importlib.import_module(name)
+                except Exception as retry_exc:
+                    message = (
+                        f"The Python package '{friendly_name}' was installed automatically, "
+                        "but it still could not be imported."
+                    )
+                    if output.strip():
+                        message += f"\n\nInstaller output:\n{output.strip()}"
+                    _fatal_startup_error(message, exc=retry_exc)
+            else:
+                message = (
+                    f"Attempted to auto-install the Python package '{friendly_name}', "
+                    "but the installation command failed."
+                )
+                if output.strip():
+                    message += f"\n\nInstaller output:\n{output.strip()}"
+                install_error = RuntimeError(
+                    f"pip exited with status {returncode} while installing {hint!r}"
+                )
+                _fatal_startup_error(message, exc=install_error)
+
         message = (
             f"The Python package '{friendly_name}' is required to run the GPI Survey QC Tool, "
             "but it is not installed on this system."
