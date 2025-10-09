@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 import threading
 import queue
+import base64
 import pandas as pd
 import numpy as np
 import re
@@ -48,6 +49,12 @@ try:
     XLSX_ENGINE = "xlsxwriter"
 except Exception:
     XLSX_ENGINE = "openpyxl"
+
+try:
+    from PIL import Image, ImageTk
+except Exception:  # pragma: no cover - optional dependency
+    Image = None
+    ImageTk = None
 
 # ============ Regex / parsing ============
 CONTROL_START = {"ST", "START", "BEG", "BEGIN"}
@@ -496,6 +503,15 @@ def _df_to_html(df: pd.DataFrame) -> str:
     return df.to_html(index=False, classes="table table-zebra", border=0, escape=False)
 
 def write_html_report(dfs: dict, output_path: Path, title="GPI Survey QC Report"):
+    logo_data_uri = ""
+    logo_path = Path(__file__).with_name("GPI-768x768.jpg")
+    if logo_path.exists():
+        try:
+            encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            logo_data_uri = f"data:image/jpeg;base64,{encoded}"
+        except Exception:
+            logo_data_uri = ""
+
     css = f"""
     <style>
       :root {{
@@ -512,7 +528,9 @@ def write_html_report(dfs: dict, output_path: Path, title="GPI Survey QC Report"
       header {{
         position: sticky; top: 0; z-index: 10; background: var(--gpi-green);
         color: #fff; padding: 16px 24px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+        display: flex; align-items: center; gap: 16px;
       }}
+      header img.logo {{ height: 48px; width: auto; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,.25); }}
       h1 {{ margin: 0; font-size: 22px; }}
       .container {{ display: grid; grid-template-columns: 280px 1fr; gap: 20px; padding: 20px; }}
       nav {{
@@ -589,6 +607,7 @@ def write_html_report(dfs: dict, output_path: Path, title="GPI Survey QC Report"
 </head>
 <body>
 <header>
+  {f'<img src="{logo_data_uri}" alt="GPI logo" class="logo" />' if logo_data_uri else ''}
   <h1>{title}</h1>
 </header>
 <div class="container">
@@ -663,12 +682,25 @@ class App(BaseTk):
 
         self.log_q = queue.Queue()
         self.output_format = "excel"  # or "html"
+        self.logo_photo = None
+
+        if Image and ImageTk:
+            logo_path = Path(__file__).with_name("GPI-768x768.jpg")
+            if logo_path.exists():
+                try:
+                    img = Image.open(logo_path)
+                    img.thumbnail((48, 48), getattr(Image, "LANCZOS", Image.BICUBIC))
+                    self.logo_photo = ImageTk.PhotoImage(img)
+                except Exception:
+                    self.logo_photo = None
 
         # Header with gear on right
         header = tk.Frame(self, bg=GPI_GREEN)
         header.pack(fill=tk.X)
+        if self.logo_photo is not None:
+            tk.Label(header, image=self.logo_photo, bg=GPI_GREEN).pack(side="left", padx=(16, 8), pady=6)
         tk.Label(header, text="GPI Survey QC Tool", bg=GPI_GREEN, fg="white",
-                 font=("Segoe UI", 16, "bold"), pady=10).pack(side="left", padx=16)
+                 font=("Segoe UI", 16, "bold"), pady=10).pack(side="left", padx=(0, 16))
         tk.Button(header, text="⚙", bg=GPI_GREEN, fg="white", bd=0, font=("Segoe UI", 14, "bold"),
                   activebackground=GPI_HL, activeforeground="black",
                   command=self._open_settings).pack(side="right", padx=12, pady=6)
