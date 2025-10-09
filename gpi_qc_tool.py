@@ -11,19 +11,82 @@ Includes:
 Dependencies: pandas, numpy, openpyxl, xlsxwriter
 """
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+import importlib
+import sys
+import traceback
 from pathlib import Path
 from datetime import datetime
+from typing import NoReturn, Optional
 import threading
 import queue
 import base64
-import pandas as pd
-import numpy as np
 import re
-import sys
-import traceback
 import uuid
+
+
+def _show_error_dialog(title: str, message: str) -> None:
+    """Best-effort helper to surface a fatal error before exiting."""
+
+    try:
+        import tkinter as _tk
+        from tkinter import messagebox as _messagebox
+
+        root = _tk.Tk()
+        root.withdraw()
+        _messagebox.showerror(title, message)
+        root.destroy()
+    except Exception:
+        # If Tk cannot be imported or the dialog fails, fall back to stderr only.
+        pass
+
+
+def _fatal_startup_error(message: str, *, exc: Optional[Exception] = None) -> NoReturn:
+    """Display a fatal startup error and terminate the process."""
+
+    details = message.strip()
+    if exc is not None:
+        details = f"{details}\n\nOriginal error: {exc}"
+
+    _show_error_dialog("GPI Survey QC Tool", details)
+    sys.stderr.write(details + "\n")
+    if exc is not None:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+    sys.exit(1)
+
+
+def _require_module(name: str, friendly_name: str, install_hint: str):
+    """Import ``name`` or abort with a clear dependency error."""
+
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:  # pragma: no cover - requires missing deps
+        hint = install_hint.strip()
+        message = (
+            f"The Python package '{friendly_name}' is required to run the GPI Survey QC Tool, "
+            "but it is not installed on this system."
+        )
+        if hint:
+            message += (
+                "\n\nInstall the missing dependencies by running:\n"
+                f"    python -m pip install {hint}"
+            )
+        _fatal_startup_error(message, exc=exc)
+
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, scrolledtext
+except Exception as exc:  # pragma: no cover - requires Tk failure
+    _fatal_startup_error(
+        "Python could not import Tkinter, which is required for the graphical interface.\n\n"
+        "Install a Python build that bundles Tk support (for example, from python.org).",
+        exc=exc,
+    )
+
+pd = _require_module("pandas", "pandas", "pandas numpy openpyxl xlsxwriter")
+np = _require_module("numpy", "numpy", "pandas numpy openpyxl xlsxwriter")
+_require_module("openpyxl", "openpyxl", "openpyxl")
+_require_module("xlsxwriter", "xlsxwriter", "xlsxwriter")
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
